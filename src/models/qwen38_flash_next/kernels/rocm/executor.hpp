@@ -202,11 +202,12 @@ private:
   Control* control_{nullptr};
   std::uint32_t blocks_{0};  ///< host shadow of Control::blocks
   /// Persistent Q8->F16 prefill staging (q8 mode): one pair shared across
-  /// layers, reused across prefill chunks, dequantized incrementally. Rows
-  /// [0, q8_stage_valid_) mirror (q8_stage_ksrc_, q8_stage_vsrc_); the
-  /// source pointers disambiguate trunk vs draft caches, while
-  /// RestoreSnapshot/Rollback invalidate on overwrite/rewind. Buffers are
-  /// freed with allocations_ at teardown.
+  /// layers and reused across prefill chunks. Rows [0, q8_stage_valid_)
+  /// mirror (q8_stage_ksrc_, q8_stage_vsrc_); the source pointers tell the
+  /// layers and the draft cache apart, so a layer change converts again.
+  /// RestoreSnapshot/Rollback invalidate on overwrite/rewind, and each pass
+  /// clamps valid rows to its first written position. Buffers are freed with
+  /// allocations_ at teardown.
   mutable __half* q8_stage_k_{nullptr};
   mutable __half* q8_stage_v_{nullptr};
   mutable std::size_t q8_stage_cap_{0};  ///< rows provisioned

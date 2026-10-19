@@ -2569,17 +2569,25 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           return false;
         const std::size_t row_bytes = std::size_t(kv_row) * sizeof(__half);
         const std::size_t kv_q8_row = (std::size_t{kv_row} + 31) / 32 * 34;
-        // Persistent per-session staging: reused across prefill chunks and
-        // dequantized incrementally (only rows [valid, need) are converted).
-        // The source pointers disambiguate trunk vs draft caches; snapshot
-        // restore/rollback invalidate (see RestoreSnapshot/Rollback). Any
-        // failure here falls back to the scalar kernel below.
+        // Persistent per-session staging: one buffer pair reused across
+        // layers and prefill chunks, which saves the per-chunk allocation.
+        // Rows [valid, need) are converted. Every attention layer has its own
+        // cache, so consecutive layers change the source pointers and convert
+        // [0, need) again; only the second half of a checkpoint split reuses
+        // rows. Per-layer staging would make chunks incremental but hold an
+        // F16 copy of every layer's K/V, more than the Q8 cache saves.
+        // Snapshot restore/rollback invalidate (see RestoreSnapshot/Rollback).
+        // Any failure here falls back to the scalar kernel below.
         if (session.q8_stage_ksrc_ != s.k_cache_q8 ||
             session.q8_stage_vsrc_ != s.v_cache_q8) {
           session.q8_stage_ksrc_ = s.k_cache_q8;
           session.q8_stage_vsrc_ = s.v_cache_q8;
           session.q8_stage_valid_ = 0;
         }
+        // This pass has just written cache rows from pos0 on, so staged rows
+        // past pos0 are stale whatever rewound the session (Reset, MtpRewind,
+        // an adapter); the clamp covers paths that do not invalidate.
+        session.q8_stage_valid_ = std::min(session.q8_stage_valid_, pos0);
         if (need > session.q8_stage_cap_) {
           const std::size_t new_cap =
               (std::size_t{need} + 4095) & ~std::size_t{4095};
