@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -2227,6 +2228,59 @@ bool NpuWarm() {
   return now - burst_start.load() >= warmup_ms;
 }
 
+/// GUFO_NPU_STATS=1 also counts trunk prefill chunks and the layer projections
+/// the NPU took. The NPU takes only whole groups of its kernel's rows, and a
+/// prefill beside an active decoder is cut to --prefill-chunk rows (512 by
+/// default), so a served run can admit nothing while solo prefill does.
+struct NpuAdmission {
+  std::atomic<std::uint64_t> chunks{0};
+  std::atomic<std::uint64_t> rows{0};
+  std::atomic<std::uint64_t> short_chunks{0};   ///< below one NPU group
+  std::atomic<std::uint64_t> ragged_chunks{0};  ///< not a whole group count
+  std::atomic<std::uint64_t> ssm_in{0};
+  std::atomic<std::uint64_t> attn_gate{0};
+  std::atomic<std::uint64_t> shexp{0};
+};
+
+NpuAdmission* NpuAdmissionStats() {
+  static NpuAdmission stats;
+  static const bool enabled = std::getenv("GUFO_NPU_STATS") != nullptr;
+  return enabled ? &stats : nullptr;
+}
+
+void NoteNpuTaken(std::atomic<std::uint64_t> NpuAdmission::* site) {
+  if (NpuAdmission* stats = NpuAdmissionStats())
+    (stats->*site).fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteNpuPrefillChunk(std::uint32_t rows, std::uint32_t group_rows) {
+  NpuAdmission* stats = NpuAdmissionStats();
+  if (stats == nullptr)
+    return;
+  constexpr auto relaxed = std::memory_order_relaxed;
+  stats->rows.fetch_add(rows, relaxed);
+  if (rows < group_rows)
+    stats->short_chunks.fetch_add(1, relaxed);
+  else if (rows % group_rows != 0)
+    stats->ragged_chunks.fetch_add(1, relaxed);
+  const std::uint64_t chunks = stats->chunks.fetch_add(1, relaxed) + 1;
+  if (chunks % 16 != 0)
+    return;
+  std::fprintf(
+      stderr,
+      "npu admission: %llu prefill chunks, %llu rows (%llu below %u "
+      "rows, %llu not a multiple); NPU took %llu ssm_in, %llu "
+      "attention gate, %llu shared-expert layer projections\n",
+      static_cast<unsigned long long>(chunks),
+      static_cast<unsigned long long>(stats->rows.load(relaxed)),
+      static_cast<unsigned long long>(stats->short_chunks.load(relaxed)),
+      group_rows,
+      static_cast<unsigned long long>(stats->ragged_chunks.load(relaxed)),
+      static_cast<unsigned long long>(stats->ssm_in.load(relaxed)),
+      static_cast<unsigned long long>(stats->attn_gate.load(relaxed)),
+      static_cast<unsigned long long>(stats->shexp.load(relaxed)));
+}
+
 }  // namespace
 
 bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
@@ -2259,6 +2313,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
           !l.npu_z.empty() && n_tokens % npu->tokens() == 0 &&
           n_tokens / npu->tokens() <= npu_a_.size() &&
           l.ssm_in.cols == npu->k() && NpuWarm()) {
+        NoteNpuTaken(&NpuAdmission::ssm_in);
         // The last rows of the projection run on the NPU while the GPU does
         // the rest; the NPU output lands in the tail of each qkvz row.
         const std::uint32_t npu_cols =
@@ -2438,6 +2493,7 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
           !l.npu_gate.empty() && n_tokens % npu->tokens() == 0 &&
           n_tokens / npu->tokens() <= npu_a_.size() &&
           l.attn_qkv.cols == npu->k() && NpuWarm()) {
+        NoteNpuTaken(&NpuAdmission::attn_gate);
         const std::uint32_t group_tokens = npu->tokens();
         npu_gate_groups = n_tokens / group_tokens;
         for (std::uint32_t g = 0; g < npu_gate_groups; ++g) {
@@ -2702,6 +2758,7 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
       n_tokens / npu->tokens() <= npu_a_.size() &&
       l.shexp_up.cols == npu->k() && l.shexp_up.rows <= npu->n() &&
       DenseF16Route(l.shexp_down, n_tokens) && NpuWarm()) {
+    NoteNpuTaken(&NpuAdmission::shexp);
     PrepareHalfInput(x, n_tokens, l.shexp_up.cols);
     const std::uint32_t group_tokens = npu->tokens();
     npu_shexp_groups = n_tokens / group_tokens;
@@ -3013,6 +3070,9 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   DropReadyQ8();
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
+  if (NpuGemm* npu = model_->npu();
+      npu != nullptr && mode == ForwardMode::kPrefill)
+    NoteNpuPrefillChunk(n, npu->tokens());
   if (checkpoint && (mode != ForwardMode::kPrefill ||
                      checkpoint->source != &session || checkpoint->tokens > n ||
                      checkpoint->state->position_ !=
