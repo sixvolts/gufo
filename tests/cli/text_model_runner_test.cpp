@@ -2090,6 +2090,27 @@ void TestCgroupAvailableCountsReclaimableCache() {
   fs::remove_all(root);
 }
 
+void TestMeminfoAvailableCountsGpuReclaim() {
+  using gufo::server::MeminfoAvailableBytes;
+  constexpr std::uint64_t kib = 1024;
+  // Ubuntu 26.04 reports the TTM page pool, which MemAvailable omits, as
+  // GPUReclaim; a 128 GiB host read this with no GPU process running.
+  Expect(MeminfoAvailableBytes("MemAvailable:   79715400 kB\n"
+                               "GPUReclaim:     42401836 kB\n") ==
+             (79715400 + 42401836) * kib,
+         "pooled GTT pages a GPU process freed are available");
+  Expect(MeminfoAvailableBytes("MemAvailable:   100000000 kB\n"
+                               "CmaFree:         13034628 kB\n"
+                               "GPUReclaim:      20000000 kB\n") ==
+             (100000000 + 20000000 - 13034628) * kib,
+         "free CMA is excluded after adding the page pool");
+  Expect(MeminfoAvailableBytes("GPUReclaim:  9000 kB\nCmaFree:  10000 kB\n"
+                               "MemAvailable:  0 kB\n") == 0,
+         "free CMA beyond MemAvailable and the pool saturates at zero");
+  Expect(!MeminfoAvailableBytes("GPUReclaim:  4000 kB\n"),
+         "a page pool without MemAvailable keeps the caller's fallback");
+}
+
 void TestSnapshotStartupReportsSelectedLimits() {
   class ChangingHeadroomRunner final : public SnapshotRunner {
   public:
@@ -2504,6 +2525,7 @@ int main() {
   TestSnapshotCacheCapacityIsReportedAtStartup();
   TestMeminfoAvailableExcludesFreeCma();
   TestCgroupAvailableCountsReclaimableCache();
+  TestMeminfoAvailableCountsGpuReclaim();
   TestSnapshotStartupReportsSelectedLimits();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();

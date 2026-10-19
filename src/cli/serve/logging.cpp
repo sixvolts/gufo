@@ -166,7 +166,9 @@ std::string Logger::MemoryStatus() {
   std::ostringstream output;
   output << "rss_mib=" << ReadMemoryKiB("/proc/self/status", "VmRSS:") / 1024
          << " host_available_mib="
-         << ReadMemoryKiB("/proc/meminfo", "MemAvailable:") / 1024;
+         << ReadMemoryKiB("/proc/meminfo", "MemAvailable:") / 1024
+         << " gpu_reclaim_mib="
+         << ReadMemoryKiB("/proc/meminfo", "GPUReclaim:") / 1024;
   return output.str();
 }
 

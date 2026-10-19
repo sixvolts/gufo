@@ -76,10 +76,13 @@ struct TextRunnerDiskCacheOptions {
   std::size_t min_checkpoint_step_tokens{2048};
 };
 
-/// MemAvailable from /proc/meminfo text minus CmaFree, in bytes. Free CMA
-/// pages count as available but only hold movable pages, not GPU
-/// allocations; the kernel's KHO scratch area can make that several GiB.
-/// Nullopt when MemAvailable is missing.
+/// MemAvailable from /proc/meminfo text plus GPUReclaim minus CmaFree, in
+/// bytes. Free CMA pages count as available but only hold movable pages, not
+/// GPU allocations; the kernel's KHO scratch area can make that several GiB.
+/// GPUReclaim is the TTM page pool: GTT pages a GPU process freed, which the
+/// next GPU allocation reuses and the TTM shrinker returns under pressure, but
+/// which MemAvailable leaves out. It can hold tens of GiB after another GPU
+/// process exits. Nullopt when MemAvailable is missing.
 [[nodiscard]] std::optional<std::uint64_t> MeminfoAvailableBytes(
     std::string_view meminfo);
 /// `host_available` bounded by every cgroup v2 memory limit from the process's

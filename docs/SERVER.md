@@ -192,9 +192,11 @@ pixel/encoded bytes, hits, misses and evictions.
 
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
-container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
-pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
-movable pages, not GPU allocations. 27B also checks HIP free memory. A
+container limits. Available RAM is `MemAvailable` plus `GPUReclaim` minus
+`CmaFree`: free CMA pages, such as the kernel's KHO scratch area on Ubuntu
+26.04, only hold movable pages, not GPU allocations, while `GPUReclaim` is the
+TTM page pool of GTT pages another GPU process freed, which `MemAvailable` omits
+although the next GPU allocation reuses them. 27B also checks HIP free memory. A
 positive value sets a byte cap that may exceed the automatic budget, up to the
 available host RAM minus 4 GiB; the startup line reports both as
 `automatic_bytes` and `max_bytes`.
@@ -1305,7 +1307,8 @@ memory.
 
 Loading logs report elapsed time, model, context and session capacity,
 speculative mode and memory. `rss_mib` is process resident memory;
-`host_available_mib` is available system memory. At load completion,
+`host_available_mib` is available system memory (`MemAvailable`) and
+`gpu_reclaim_mib` the TTM page pool it leaves out. At load completion,
 `gpu_device_used_mib` is device-wide HIP usage. These overlap on unified memory
 and must not be added together.
 With disk caching enabled, `phase=artifact_identity` identifies full-file

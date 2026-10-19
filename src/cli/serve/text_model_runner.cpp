@@ -92,6 +92,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
 std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
   std::optional<std::uint64_t> available_kib;
   std::uint64_t cma_free_kib = 0;
+  std::uint64_t gpu_reclaim_kib = 0;
   std::istringstream lines{std::string(meminfo)};
   for (std::string line; std::getline(lines, line);) {
     std::istringstream fields(line);
@@ -103,11 +104,13 @@ std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
       available_kib = kib;
     else if (key == "CmaFree:")
       cma_free_kib = kib;
+    else if (key == "GPUReclaim:")
+      gpu_reclaim_kib = kib;
   }
   if (!available_kib)
     return std::nullopt;
-  return (*available_kib > cma_free_kib ? *available_kib - cma_free_kib : 0) *
-         1024;
+  const std::uint64_t kib = *available_kib + gpu_reclaim_kib;
+  return (kib > cma_free_kib ? kib - cma_free_kib : 0) * 1024;
 }
 
 std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
